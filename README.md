@@ -39,7 +39,8 @@ However many people open the page, NYT is fetched at most once per `MIN_SYNC_INT
 ## Quick start
 
 ```bash
-git clone <this repo> sb-buddy && cd sb-buddy
+git clone https://github.com/MrKieren/spelling-bee-buddy.git
+cd spelling-bee-buddy
 cp .env.example .env                              # optional: change ports and timings
 mkdir -p debug && sudo chown 1000:1000 debug      # Linux / Pi only
 docker compose up -d --build                      # first build takes a while on a Pi
