@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#f7da21">
+<title>Bee Buddy</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <div id="hive" class="hive" aria-label="Today's letters"></div>
+    <div class="meta">
+      <h1>Bee Buddy</h1>
+      <p id="date" class="muted"></p>
+    </div>
+  </header>
+
+  <p id="status" class="status" role="status"><span class="dot"></span><span id="status-text">Loading…</span></p>
+
+
+  <section id="progress" class="card" hidden>
+    <div class="rank-row">
+      <strong id="rank"></strong>
+      <span id="points" class="muted"></span>
+    </div>
+    <div class="bar"><div id="bar-fill"></div><div id="bar-genius" title="Genius"></div></div>
+    <dl class="stats">
+      <div><dt>Words</dt><dd id="s-words"></dd></div>
+      <div><dt>Pangrams</dt><dd id="s-pangrams"></dd></div>
+      <div><dt>Next</dt><dd id="s-next"></dd></div>
+    </dl>
+  </section>
+
+  <section id="hints" class="card hints" hidden>
+    <h2>Totals</h2>
+    <p id="totals" class="totals"></p>
+
+    <h2>Spelling Bee Grid</h2>
+    <div id="grid-wrap" class="grid-wrap"><table id="grid" class="grid"></table></div>
+    <p id="pangrams" class="pangrams"></p>
+
+    <h2>Two letter list</h2>
+    <ul id="two" class="two"></ul>
+  </section>
+
+  <section id="visitors" class="card" hidden>
+    <h2>You vs. other Bee Buddy visitors</h2>
+    <p class="muted">Share of Bee Buddy visitors who found each word. Words you haven't found yet show only their first letter and length.</p>
+    <ol id="v-rows" class="vrows"></ol>
+    <p id="v-note" class="muted small"></p>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

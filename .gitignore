@@ -1,0 +1,19 @@
+# Local settings and anything that can access your NYT account
+.env
+secrets/*
+!secrets/.gitkeep
+
+# Debug captures (contain puzzle answers and request data)
+debug/*
+!debug/.gitkeep
+
+# Python
+__pycache__/
+.pytest_cache/
+.venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

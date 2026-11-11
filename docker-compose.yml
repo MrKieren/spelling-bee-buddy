@@ -1,0 +1,50 @@
+name: sb-buddy
+
+services:
+  # Private: logged-in headless browser + the admin page.
+  # Published on 127.0.0.1 only, so the admin page works from this machine and
+  # nowhere else. The public `web` server only forwards /sync and /status to it.
+  collector:
+    build: ./collector
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${ADMIN_PORT:-8091}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PROFILE_DIR: /profile
+      PUBLIC_DIR: /public
+      DEBUG_DIR: /debug
+      COOKIES_FILE: /secrets/cookies.txt
+    volumes:
+      - profile:/profile          # browser profile + cookie saved from the admin page
+      - public:/public            # buddy.json (counts only) shared read-only with web
+      - ./debug:/debug            # screenshots / captures for troubleshooting
+      - ./secrets:/secrets:ro     # optional cookies.txt (the admin page is easier)
+    networks: [backend]
+    shm_size: 512m
+    mem_limit: 1g
+
+  # Public: the only thing exposed.
+  web:
+    build: ./web
+    restart: unless-stopped
+    depends_on: [collector]
+    ports:
+      - "${PUBLIC_PORT:-8090}:80"
+    volumes:
+      - public:/public:ro
+    networks: [backend]
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+
+volumes:
+  profile:
+  public:
+
+networks:
+  backend:
