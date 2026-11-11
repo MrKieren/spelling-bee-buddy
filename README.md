@@ -75,13 +75,23 @@ The collector uses whichever of the two was updated most recently, and reads the
 
 `http://localhost:8091` shows whether you're logged in to NYT, when it last synced and your progress. It has a **Sync now** button and the cookie form.
 
-It's published on `127.0.0.1` only, so it works from the machine running Docker and nowhere else. On a headless Pi, reach it from another computer with an SSH tunnel:
+It's published on `127.0.0.1` only, so it works from the machine running Docker and nowhere else, not even from other devices on your home network. That's deliberate: the page has no password, so anyone who could reach it could change your NYT cookie.
+
+### Reaching it from another computer (e.g. a headless Pi)
+
+Open an SSH tunnel **from the computer you want to browse on**, not from the Pi:
 
 ```bash
-ssh -L 8091:localhost:8091 pi@<pi-address>
+ssh -L 8091:127.0.0.1:8091 pi@<pi-address>
 ```
 
-then open `http://localhost:8091` on that computer.
+Leave that session open, then browse to **`http://localhost:8091`** on the same computer. The tunnel carries the request to the Pi, where the admin page sees it as local.
+
+If it doesn't load:
+
+- **`channel N: open failed: connect failed`** in the SSH window means the tunnel reached the Pi but nothing answered on port 8091. On the Pi, check that the containers are running with `docker compose ps` (look for `127.0.0.1:8091->8000`), and test the page locally with `curl -s http://127.0.0.1:8091/ | head -3`.
+- **Use `127.0.0.1`, not `localhost`, on the Pi side of the tunnel.** On some systems `localhost` resolves to the IPv6 address `::1` first, and the admin port only listens on IPv4.
+- **Port 8091 already in use on your computer** (for example, another copy of Bee Buddy running there): pick a different local port, e.g. `ssh -L 9091:127.0.0.1:8091 pi@<pi-address>`, and open `http://localhost:9091`.
 
 ## Using it away from home
 
