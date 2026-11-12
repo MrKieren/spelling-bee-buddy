@@ -120,12 +120,40 @@ def _string_lists(obj, out: list[list[str]]) -> None:
             _string_lists(v, out)
 
 
-def found_from_json(bodies: list, answers: set[str], pangrams: set[str]) -> set[str]:
-    """Largest list of strings in game-state JSON that is made only of answers.
+def _game_states(obj, out: list[dict]) -> None:
+    """Collect every NYT game-state record ({"puzzle_id", "game_data": {...}})."""
+    if isinstance(obj, dict):
+        if isinstance(obj.get("game_data"), dict) and "puzzle_id" in obj:
+            out.append(obj)
+        for v in obj.values():
+            _game_states(v, out)
+    elif isinstance(obj, list):
+        for x in obj:
+            _game_states(x, out)
 
-    The full answer list and the pangram list are excluded, since both are
-    answer subsets that aren't your progress.
+
+def found_from_json(bodies: list, answers: set[str], pangrams: set[str], puzzle_id=None) -> set[str]:
+    """Your found words for today's puzzle, from NYT's game-state JSON.
+
+    First choice: the `game_data.answers` of the state whose `puzzle_id` is
+    today's. That list is your found words, so it's trusted even when it holds
+    every answer (Queen Bee).
+
+    Fallback, if no state matches: the largest list of strings made only of
+    answers, skipping lists equal to the full answer or pangram list, since
+    those could be puzzle data rather than progress.
     """
+    if puzzle_id is not None:
+        states: list[dict] = []
+        for body in bodies:
+            _game_states(body, states)
+        for st in states:
+            if str(st.get("puzzle_id")) != str(puzzle_id):
+                continue
+            words = st["game_data"].get("answers")
+            if isinstance(words, list):
+                return {w.lower() for w in words if isinstance(w, str)} & answers
+
     best: set[str] = set()
     for body in bodies:
         lists: list[list[str]] = []
@@ -227,7 +255,7 @@ async def snapshot() -> Snapshot:
                     pass
                 state_bodies = [c["body"] for c in captured if "/svc/games" in c["url"]]
                 pangrams = {p.lower() for p in game.get("pangrams", [])}
-                found = found_from_json(state_bodies, answers, pangrams)
+                found = found_from_json(state_bodies, answers, pangrams, game.get("id"))
                 source = "api" if found else "none"
                 dom = await _found_from_dom(page, answers)
                 if dom - found:
