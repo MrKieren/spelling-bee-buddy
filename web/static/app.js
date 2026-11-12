@@ -2,7 +2,7 @@
 
 // How often to ask for a fresh sync while the page is open and visible.
 const SYNC_EVERY_MS = 60_000;
-const POLL_MS = 2_000;
+const POLL_MS = 500;
 const POLL_TIMEOUT_MS = 120_000;
 
 let data = null;

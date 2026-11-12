@@ -1,12 +1,21 @@
 """Headless browser that reads today's puzzle and your progress.
 
-Each sync launches Chromium with your NYT session cookie (see session.py),
-loads the Spelling Bee page, reads `window.gameData` for the puzzle, and works
-out which words you've found from the game-state JSON the page fetches
-(falling back to the on-page word list).
+One Chromium instance stays running with your NYT session cookie (see
+session.py), with a tab parked on nytimes.com. A normal sync doesn't
+load any page: from that tab it fetches the same two small JSON files the game
+itself uses (today's puzzle and your game state), which takes well under a
+second.
+
+If that fails, it falls back to the original method: load the game page in a
+fresh tab, read `window.gameData`, and work out your words from the JSON the
+page fetches (or the on-page word list).
+
+Buddy's visitor stats need Buddy's page to render, which is slow, so main.py
+reads them separately in the background (`visitor_stats`).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -22,16 +31,29 @@ from .session import SESSION_COOKIE, current_cookies
 log = logging.getLogger("collector.nyt")
 
 GAME_URL = "https://www.nytimes.com/puzzles/spelling-bee"
+PUZZLE_API = "https://www.nytimes.com/svc/spelling-bee/v1/active.json"
+# A plain-text NYT page to park the tab on: same origin as the APIs, but no
+# scripts or ads running in the background.
+PARK_URL = "https://www.nytimes.com/robots.txt"
+STATE_API = "https://www.nytimes.com/svc/games/state/spelling_bee/latest?puzzle_id={id}"
 BUDDY_URL = "https://www.nytimes.com/interactive/2023/upshot/spelling-bee-buddy.html"
 
 PROFILE_DIR = Path(os.environ.get("PROFILE_DIR", "/profile"))
 DEBUG_DIR = Path(os.environ.get("DEBUG_DIR", "/debug"))
 DEBUG_CAPTURE = os.environ.get("DEBUG_CAPTURE", "0") == "1"
-# Buddy's visitor stats: re-read when your found words change, or after this long.
-VISITOR_STATS = os.environ.get("VISITOR_STATS", "1") == "1"
-VISITOR_STATS_MAX_AGE = int(os.environ.get("VISITOR_STATS_MINUTES", "15")) * 60
+# Restart the browser this often, so a long-running Chromium can't build up memory.
+BROWSER_MAX_AGE = int(os.environ.get("BROWSER_RESTART_HOURS", "6")) * 3600
 
-_visitors_cache: dict = {"key": None, "at": 0.0, "data": None}
+# Fetches JSON from inside the parked NYT tab, so it's same-origin and carries
+# the browser's cookies exactly like the game's own requests.
+_FETCH_JS = """
+async (url) => {
+  const r = await fetch(url, { credentials: 'include', headers: { accept: 'application/json' } });
+  let body = null;
+  try { body = await r.json(); } catch (e) {}
+  return { status: r.status, body };
+}
+"""
 
 # Reads Buddy's rendered "You vs. Other Bee Buddy Visitors" table.
 _VISITORS_JS = """
@@ -193,53 +215,150 @@ async def _start_game(page: Page) -> None:
             continue
 
 
-async def _visitor_stats(page: Page, found: set[str], puzzle_id) -> dict | None:
-    """Buddy's visitor table, re-read only when it could have changed."""
-    key = (puzzle_id, frozenset(found))
-    fresh = time.time() - _visitors_cache["at"] < VISITOR_STATS_MAX_AGE
-    if _visitors_cache["key"] == key and fresh:
-        return _visitors_cache["data"]
-    try:
-        await page.goto(BUDDY_URL, wait_until="domcontentloaded", timeout=60_000)
-        await page.wait_for_selector(".reader-stats table tbody tr .bar-fg", timeout=45_000)
-        data = await page.evaluate(_VISITORS_JS)
-    except Exception as exc:
-        log.warning("Couldn't read Buddy's visitor stats: %s", exc)
-        return _visitors_cache["data"] if _visitors_cache["key"] and _visitors_cache["key"][0] == puzzle_id else None
-    if data and data.get("rows"):
-        _visitors_cache.update(key=key, at=time.time(), data=data)
-        log.info("Read visitor stats for %d words", len(data["rows"]))
-    return data
+def puzzle_from_active(active: dict) -> dict:
+    """Today's puzzle from active.json, in the same shape as window.gameData.today."""
+    today = active["today"]
+    p = active["puzzles"][today] if isinstance(today, int) else today
+    pangrams = [w.lower() for w in p.get("pangrams", [])]
+    answers = sorted({w.lower() for w in p["answers"]} | set(pangrams))  # active.json lists pangrams separately
+    outer = p["outer_letters"]
+    return {
+        "id": p["id"],
+        "printDate": p.get("print_date"),
+        "centerLetter": p["center_letter"],
+        "outerLetters": list(outer) if isinstance(outer, str) else outer,
+        "answers": answers,
+        "pangrams": pangrams,
+    }
 
 
-async def snapshot() -> Snapshot:
-    captured: list[dict] = []   # JSON responses; your found words are in one of them
-    debug_log: list[dict] = []  # every fetch/XHR in debug mode, whatever its type
+class FastPathError(Exception):
+    pass
 
-    async def on_response(resp: Response):
-        if "nytimes.com" not in resp.url:
-            return
-        ctype = resp.headers.get("content-type", "")
-        if DEBUG_CAPTURE and resp.request.resource_type in ("fetch", "xhr"):
-            entry = {"url": resp.url, "status": resp.status, "type": ctype}
+
+class NYT:
+    """Long-lived browser session. All methods are safe to call concurrently."""
+
+    def __init__(self):
+        self._pw = None
+        self._ctx: BrowserContext | None = None
+        self._anchor: Page | None = None
+        self._started = 0.0
+        self._lock = asyncio.Lock()   # guards starting / restarting the browser
+
+    async def close(self) -> None:
+        async with self._lock:
+            await self._close()
+
+    async def _close(self) -> None:
+        self._anchor = None
+        if self._ctx:
             try:
-                entry["text"] = (await resp.text())[:2_000_000]
-            except Exception as exc:
-                entry["error"] = str(exc)
-            debug_log.append(entry)
-        if "json" not in ctype:
-            return
-        try:
-            captured.append({"url": resp.url, "body": await resp.json()})
-        except Exception:
-            pass
+                await self._ctx.close()
+            except Exception:
+                pass
+        if self._pw:
+            try:
+                await self._pw.stop()
+            except Exception:
+                pass
+        self._ctx = self._pw = None
 
-    async with async_playwright() as pw:
-        ctx = await _launch(pw)
-        try:
+    async def _context(self) -> BrowserContext:
+        async with self._lock:
+            alive = self._ctx is not None
+            if alive and time.time() - self._started < BROWSER_MAX_AGE:
+                try:
+                    await self._ctx.cookies()   # cheap liveness check
+                    return self._ctx
+                except Exception:
+                    log.warning("Browser went away; restarting it")
+            await self._close()
+            self._pw = await async_playwright().start()
+            self._ctx = await _launch(self._pw)
+            self._started = time.time()
+            log.info("Browser started")
+            return self._ctx
+
+    async def _anchor_page(self, ctx: BrowserContext) -> Page:
+        """The parked tab used for fast fetches; set up once, then reused.
+
+        It opens the game page first (so NYT sets whatever cookies it sets for
+        a normal visit), then parks on a plain-text NYT page so no scripts or
+        ads keep running.
+        """
+        if self._anchor is None or self._anchor.is_closed():
             page = await ctx.new_page()
-            logged_in = await _load_session(ctx)
+            await page.goto(GAME_URL, wait_until="domcontentloaded", timeout=60_000)
+            await page.goto(PARK_URL, wait_until="domcontentloaded", timeout=30_000)
+            self._anchor = page
+        return self._anchor
 
+    async def _drop_anchor(self) -> None:
+        page, self._anchor = self._anchor, None
+        if page and not page.is_closed():
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+    # ---------- syncing ----------
+
+    async def snapshot(self) -> Snapshot:
+        ctx = await self._context()
+        logged_in = await _load_session(ctx)
+        if not DEBUG_CAPTURE:
+            try:
+                return await self._fast(ctx, logged_in)
+            except Exception as exc:
+                log.warning("Quick sync failed (%s); loading the full page instead", exc)
+                await self._drop_anchor()
+        return await self._full(ctx, logged_in)
+
+    async def _fast(self, ctx: BrowserContext, logged_in: bool) -> Snapshot:
+        page = await self._anchor_page(ctx)
+        r = await page.evaluate(_FETCH_JS, PUZZLE_API)
+        if r["status"] != 200 or not isinstance(r["body"], dict):
+            raise FastPathError(f"puzzle API returned {r['status']}")
+        game = puzzle_from_active(r["body"])
+
+        found, source = set(), "none"
+        if logged_in:
+            r = await page.evaluate(_FETCH_JS, STATE_API.format(id=game["id"]))
+            if r["status"] == 200 and isinstance(r["body"], dict):
+                answers = set(game["answers"])
+                found = found_from_json([r["body"]], answers, set(game["pangrams"]), game["id"])
+                source = "api-fast"
+            elif r["status"] == 404:
+                source = "api-fast"   # no state yet: you haven't played today's puzzle
+            else:
+                raise FastPathError(f"game-state API returned {r['status']}")
+        return Snapshot(game=game, found=found, logged_in=logged_in, found_source=source)
+
+    async def _full(self, ctx: BrowserContext, logged_in: bool) -> Snapshot:
+        captured: list[dict] = []   # JSON responses; your found words are in one of them
+        debug_log: list[dict] = []  # every fetch/XHR in debug mode, whatever its type
+
+        async def on_response(resp: Response):
+            if "nytimes.com" not in resp.url:
+                return
+            ctype = resp.headers.get("content-type", "")
+            if DEBUG_CAPTURE and resp.request.resource_type in ("fetch", "xhr"):
+                entry = {"url": resp.url, "status": resp.status, "type": ctype}
+                try:
+                    entry["text"] = (await resp.text())[:2_000_000]
+                except Exception as exc:
+                    entry["error"] = str(exc)
+                debug_log.append(entry)
+            if "json" not in ctype:
+                return
+            try:
+                captured.append({"url": resp.url, "body": await resp.json()})
+            except Exception:
+                pass
+
+        page = await ctx.new_page()
+        try:
             page.on("response", on_response)
             await page.goto(GAME_URL, wait_until="domcontentloaded", timeout=60_000)
             await page.wait_for_function("window.gameData && window.gameData.today", timeout=30_000)
@@ -264,13 +383,8 @@ async def snapshot() -> Snapshot:
             else:
                 await _debug_shot(page, "not-logged-in")
 
-            visitors = None
-            if logged_in and VISITOR_STATS:
-                visitors = await _visitor_stats(page, found, game.get("id"))
-
             if DEBUG_CAPTURE:
-                # Make sure Buddy itself was loaded, to see what data it fetches.
-                if logged_in and visitors is None:
+                if logged_in:
                     try:
                         await page.goto(BUDDY_URL, wait_until="domcontentloaded", timeout=60_000)
                         await page.wait_for_load_state("networkidle", timeout=30_000)
@@ -281,14 +395,33 @@ async def snapshot() -> Snapshot:
                 (DEBUG_DIR / f"capture-{int(time.time())}.json").write_text(
                     json.dumps(debug_log, indent=1, default=str)
                 )
-                # Buddy may also keep its data inside the page itself.
                 try:
                     (DEBUG_DIR / "buddy.html").write_text(await page.content())
                 except Exception:
                     pass
                 await _debug_shot(page, "last-sync")
 
-            return Snapshot(game=game, found=found, logged_in=logged_in,
-                            found_source=source, visitors=visitors)
+            return Snapshot(game=game, found=found, logged_in=logged_in, found_source=source)
         finally:
-            await ctx.close()
+            await page.close()
+
+    # ---------- visitor stats (slow; run in the background) ----------
+
+    async def visitor_stats(self) -> dict | None:
+        """Buddy's rendered "You vs. other visitors" table."""
+        ctx = await self._context()
+        await _load_session(ctx)
+        page = await ctx.new_page()
+        try:
+            await page.goto(BUDDY_URL, wait_until="domcontentloaded", timeout=60_000)
+            await page.wait_for_selector(".reader-stats table tbody tr .bar-fg", timeout=45_000)
+            data = await page.evaluate(_VISITORS_JS)
+        except Exception as exc:
+            log.warning("Couldn't read Buddy's visitor stats: %s", exc)
+            return None
+        finally:
+            await page.close()
+        if data and data.get("rows"):
+            log.info("Read visitor stats for %d words", len(data["rows"]))
+            return data
+        return None
