@@ -100,3 +100,28 @@ def test_perfect_pangram_counts():
                           center="a", outer=list("bcdefg"), found={"abcdefg"}, logged_in=True)
     assert d["totals"]["perfect_pangrams"] == 1
     assert d["found"]["pangrams"] == 1 and d["found"]["perfect_pangrams"] == 1
+
+
+def _state(puzzle_id, words):
+    return {"puzzle_id": str(puzzle_id), "game": "spelling_bee",
+            "game_data": {"answers": words, "isRevealed": False, "rank": "x"}}
+
+
+def test_found_from_json_queen_bee_all_words():
+    # Regression: finding every word made the found list equal the answer list,
+    # which the old heuristic skipped, so the page showed 0 found.
+    answers = set(GAME["answers"])
+    bodies = [{"states": [_state(1, ["cant"]), _state(99999, sorted(answers))]}]
+    assert found_from_json(bodies, answers, {"location"}, 99999) == answers
+
+
+def test_found_from_json_matches_todays_puzzle_only():
+    answers = set(GAME["answers"])
+    bodies = [_state(1, ["cant", "coal", "talon", "tonal"]), _state(99999, ["cant"])]
+    assert found_from_json(bodies, answers, {"location"}, 99999) == {"cant"}
+
+
+def test_found_from_json_only_pangrams_found():
+    answers = set(GAME["answers"])
+    bodies = [_state(99999, ["location"])]
+    assert found_from_json(bodies, answers, {"location"}, 99999) == {"location"}
