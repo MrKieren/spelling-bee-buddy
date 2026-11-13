@@ -22,13 +22,13 @@ It runs on your own machine (a Raspberry Pi works well) using **your own NYT sub
 ## How it works
 
 1. When the page opens, it shows the last saved copy straight away and asks the collector to sync. While the page is open it syncs again every 60 seconds, and whenever you switch back to the tab.
-2. The collector opens the Spelling Bee page in headless Chromium with your NYT session cookie. It reads today's puzzle from the page, and the words you've found from NYT's game-state data (or the on-page word list as a fallback).
-3. When your found words change, it also opens Bee Buddy to read the **You vs. other Bee Buddy visitors** stats.
-4. It works out the grid, two-letter list, points, rank and pangrams, then writes `buddy.json` for the public page.
+2. The collector keeps one headless Chromium running with your NYT session cookie, with a tab parked on nytimes.com. A sync fetches the same two small JSON files the game itself uses, today's puzzle and your game state, so it usually takes well under a second. If that fails, it falls back to loading the full Spelling Bee page.
+3. It works out the grid, two-letter list, points, rank and pangrams, then writes `buddy.json` for the public page.
+4. When your found words change, it reads Bee Buddy's **You vs. other Bee Buddy visitors** stats in the background, loading Bee Buddy's page without ads, images or fonts. That's slower than the rest, so the section can lag a few seconds behind. To bridge the gap, a newly found word moves into the stats straight away when it's the only unfound word with its first letter and length, because then its percentage is already known.
 
 **The answer list never leaves the collector.** The public file contains counts only. Like Bee Buddy, the visitor stats name only the words you've found; the rest appear as first letter and length.
 
-However many people open the page, NYT is fetched at most once per `MIN_SYNC_INTERVAL` (30 s by default), and only one sync runs at a time.
+However many people open the page, NYT is fetched at most once per `MIN_SYNC_INTERVAL` (5 s by default), and only one sync runs at a time. Bee Buddy's page is loaded at most once every 30 seconds.
 
 ## Requirements
 
@@ -111,12 +111,13 @@ All settings are optional; put them in `.env`.
 |---|---|---|
 | `PUBLIC_PORT` | `8090` | Port for the public page |
 | `ADMIN_PORT` | `8091` | Port for the admin page (bound to `127.0.0.1`) |
-| `MIN_SYNC_INTERVAL` | `30` | Minimum seconds between NYT fetches |
+| `MIN_SYNC_INTERVAL` | `5` | Minimum seconds between NYT fetches |
 | `BACKGROUND_SYNC_MINUTES` | `60` | Sync even when nobody has the page open (`0` = only on visits) |
 | `VISITOR_STATS` | `1` | Include the "You vs. other visitors" section |
 | `VISITOR_STATS_MINUTES` | `15` | Re-read visitor stats at least this often, even without new words |
 | `DEBUG_CAPTURE` | `0` | Save requests, the Buddy page and screenshots to `./debug` on each sync |
 | `FAKE_NYT` | `0` | Use a built-in demo puzzle instead of NYT |
+| `BROWSER_RESTART_HOURS` | `6` | Restart the collector's browser this often, to keep its memory in check |
 
 After changing `.env`, run `docker compose up -d`.
 
@@ -131,7 +132,7 @@ Your NYT cookie is kept in the `profile` volume, so it survives rebuilds.
 
 ## Troubleshooting
 
-- **Logs:** `docker compose logs -f collector`. A healthy sync looks like `Sync ok in 12.3s: 50/70 words (source=api, logged_in=True)`.
+- **Logs:** `docker compose logs -f collector`. A healthy sync looks like `Sync ok in 0.4s: 50/70 words (source=api-fast, logged_in=True)`. The first sync after a start or browser restart takes a few seconds longer while the browser starts. If you see `Quick sync failed … loading the full page instead` on every sync, NYT has changed something; syncs still work, just slowly.
 - **`logged_in=False`:** the cookie is missing or expired. Paste a fresh one on the admin page.
 - **Blocked as a robot:** NYT's bot protection is much stricter for VPN and datacenter addresses. Run the collector from your home connection; if the host routes everything through a VPN, exclude Docker's traffic from it.
 - **Wrong counts after an NYT change:** set `DEBUG_CAPTURE=1`, run a sync, and look in `./debug` for `capture-*.json`, `buddy.html` and the screenshots. Then adjust the parsing in `collector/app/nyt.py`. Debug files contain puzzle answers, and `.gitignore` keeps them out of the repo.

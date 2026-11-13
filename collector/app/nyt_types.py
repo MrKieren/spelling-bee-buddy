@@ -11,5 +11,3 @@ class Snapshot:
     found: set[str]
     logged_in: bool
     found_source: str
-    # Raw 'You vs. other visitors' rows from Buddy, or None if unavailable.
-    visitors: dict | None = None

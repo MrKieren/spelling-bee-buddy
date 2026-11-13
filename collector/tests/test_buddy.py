@@ -125,3 +125,31 @@ def test_found_from_json_only_pangrams_found():
     answers = set(GAME["answers"])
     bodies = [_state(99999, ["location"])]
     assert found_from_json(bodies, answers, {"location"}, 99999) == {"location"}
+
+
+def _visitors(found, rows):
+    return build_public_data(
+        answers=GAME["answers"], pangrams=GAME["pangrams"], center=GAME["centerLetter"],
+        outer=GAME["outerLetters"], found=set(found), logged_in=True,
+        visitors={"sample": 10000, "rows": rows},
+    )["visitors"]["rows"]
+
+
+def test_visitors_new_word_fills_unique_row_immediately():
+    # Buddy was read when only "cant" was found; "talon" is the only T (5).
+    rows = [{"found": True, "text": "cant", "pct": 97.6},
+            {"found": False, "text": "T (5)", "pct": 80.2},
+            {"found": False, "text": "C (5)", "pct": 70.0},
+            {"found": False, "text": "C (5)", "pct": 60.0}]
+    out = _visitors({"cant", "talon"}, rows)
+    assert {"found": True, "word": "talon", "length": 5, "pct": 80.2} in out
+    assert sum(r["found"] for r in out) == 2 and len(out) == 4
+
+
+def test_visitors_ambiguous_new_word_waits_for_next_read():
+    # "canal" and "coala"... two unfound C (5) rows: can't tell which is canal's.
+    rows = [{"found": False, "text": "C (5)", "pct": 70.0},
+            {"found": False, "text": "C (5)", "pct": 60.0}]
+    out = _visitors({"canal"}, rows)
+    assert not any(r["found"] for r in out)
+    assert "canal" not in json.dumps(out)
