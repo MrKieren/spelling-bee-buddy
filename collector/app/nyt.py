@@ -21,7 +21,9 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from playwright.async_api import BrowserContext, Page, Response, async_playwright
 
@@ -40,6 +42,15 @@ STATE_API = "https://www.nytimes.com/svc/games/state/spelling_bee/latest?puzzle_
 # Bee Buddy's own per-puzzle visitor stats: {"answers": {word: count}, "n": 10000, ...}
 STATS_API = "https://static01.nyt.com/newsgraphics/2023-01-18-spelling-bee-buddy/stats/{id}.json"
 STATS_CACHE_SECONDS = 300
+# Today's puzzle only changes once a day (3 a.m. Eastern), so it's kept until
+# the puzzle date rolls over, and re-checked at least this often anyway.
+PUZZLE_CACHE_SECONDS = 3600
+_NYT_TZ = ZoneInfo("America/New_York")
+
+
+def current_puzzle_date() -> str:
+    """The date of the puzzle NYT is serving now: a new one goes live at 3 a.m. Eastern."""
+    return (datetime.now(_NYT_TZ) - timedelta(hours=3)).date().isoformat()
 BUDDY_URL = "https://www.nytimes.com/interactive/2023/upshot/spelling-bee-buddy.html"
 
 PROFILE_DIR = Path(os.environ.get("PROFILE_DIR", "/profile"))
@@ -267,6 +278,7 @@ class NYT:
         self._lock = asyncio.Lock()   # guards starting / restarting the browser
         self._lean_stats = True       # turned off if Buddy won't render without blocked resources
         self._stats_cache: dict = {}  # puzzle id -> (fetched at, visitors)
+        self._puzzle: tuple | None = None  # (fetched at, game)
 
     async def close(self) -> None:
         async with self._lock:
@@ -337,16 +349,32 @@ class NYT:
                 await self._drop_anchor()
         return await self._full(ctx, logged_in)
 
-    async def _fast(self, ctx: BrowserContext, logged_in: bool) -> Snapshot:
-        page = await self._anchor_page(ctx)
+    async def _puzzle_game(self, page: Page) -> dict:
+        """Today's puzzle, fetched once and reused until the puzzle date changes."""
+        cached = self._puzzle
+        if cached and cached[1].get("printDate") == current_puzzle_date() \
+                and time.time() - cached[0] < PUZZLE_CACHE_SECONDS:
+            return cached[1]
         r = await page.evaluate(_FETCH_JS, [PUZZLE_API, "include"])
         if r["status"] != 200 or not isinstance(r["body"], dict):
             raise FastPathError(f"puzzle API returned {r['status']}")
         game = puzzle_from_active(r["body"])
+        self._puzzle = (time.time(), game)
+        return game
+
+    async def _fast(self, ctx: BrowserContext, logged_in: bool) -> Snapshot:
+        page = await self._anchor_page(ctx)
+        game = await self._puzzle_game(page)
 
         found, source = set(), "none"
         if logged_in:
-            r = await page.evaluate(_FETCH_JS, [STATE_API.format(id=game["id"]), "include"])
+            # Your words and (when due) the visitor stats, fetched side by side.
+            stats_due = not self._stats_fresh(game["id"])
+            state_req = page.evaluate(_FETCH_JS, [STATE_API.format(id=game["id"]), "include"])
+            if stats_due:
+                r, _ = await asyncio.gather(state_req, self._fetch_stats(page, game["id"]))
+            else:
+                r = await state_req
             if r["status"] == 200 and isinstance(r["body"], dict):
                 answers = set(game["answers"])
                 found = found_from_json([r["body"]], answers, set(game["pangrams"]), game["id"])
@@ -354,6 +382,7 @@ class NYT:
             elif r["status"] == 404:
                 source = "api-fast"   # no state yet: you haven't played today's puzzle
             else:
+                self._puzzle = None   # re-check the puzzle too on the next try
                 raise FastPathError(f"game-state API returned {r['status']}")
         return Snapshot(game=game, found=found, logged_in=logged_in, found_source=source)
 
@@ -430,20 +459,35 @@ class NYT:
 
     # ---------- visitor stats ----------
 
-    async def quick_visitor_stats(self, puzzle_id) -> dict | None:
-        """Bee Buddy's stats file for the puzzle: every word's share of
-        visitors. Small and fast; cached for a few minutes."""
+    def _stats_fresh(self, puzzle_id) -> bool:
         cached = self._stats_cache.get(puzzle_id)
-        if cached and time.time() - cached[0] < STATS_CACHE_SECONDS:
-            return cached[1]
-        ctx = await self._context()
-        page = await self._anchor_page(ctx)
-        r = await page.evaluate(_FETCH_JS, [STATS_API.format(id=puzzle_id), "omit"])
+        return bool(cached) and time.time() - cached[0] < STATS_CACHE_SECONDS
+
+    async def _fetch_stats(self, page: Page, puzzle_id) -> dict | None:
+        try:
+            r = await page.evaluate(_FETCH_JS, [STATS_API.format(id=puzzle_id), "omit"])
+        except Exception as exc:
+            log.warning("Visitor stats file failed: %s", exc)
+            return None
         data = visitors_from_stats(r["body"]) if r["status"] == 200 and isinstance(r["body"], dict) else None
         if data is None:
             log.warning("Visitor stats file unavailable (HTTP %s); using Buddy's page instead", r["status"])
-            return cached[1] if cached else None
+            return None
         self._stats_cache = {puzzle_id: (time.time(), data)}
+        return data
+
+    async def quick_visitor_stats(self, puzzle_id) -> dict | None:
+        """Bee Buddy's stats file for the puzzle: every word's share of
+        visitors. Usually already fetched alongside the sync; cached for a
+        few minutes."""
+        if self._stats_fresh(puzzle_id):
+            return self._stats_cache[puzzle_id][1]
+        ctx = await self._context()
+        page = await self._anchor_page(ctx)
+        data = await self._fetch_stats(page, puzzle_id)
+        if data is None:
+            cached = self._stats_cache.get(puzzle_id)
+            return cached[1] if cached else None
         return data
 
     # Slow fallback: read the stats from Buddy's rendered page.

@@ -177,3 +177,21 @@ def test_visitors_from_stats_rejects_bad_files():
     assert visitors_from_stats({}) is None
     assert visitors_from_stats({"answers": {}, "n": 10000}) is None
     assert visitors_from_stats({"answers": {"cant": 1}, "n": 0}) is None
+
+
+def test_current_puzzle_date_rolls_over_at_3am_eastern(monkeypatch):
+    from datetime import datetime
+    import app.nyt as n
+
+    class FakeDT(datetime):
+        now_value = None
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.now_value.astimezone(tz)
+
+    monkeypatch.setattr(n, "datetime", FakeDT)
+    FakeDT.now_value = datetime(2026, 11, 13, 7, 59, tzinfo=n._NYT_TZ).replace(hour=2, minute=59)
+    assert n.current_puzzle_date() == "2026-11-12"   # 2:59 a.m. ET: still yesterday's puzzle
+    FakeDT.now_value = datetime(2026, 11, 13, 3, 0, tzinfo=n._NYT_TZ)
+    assert n.current_puzzle_date() == "2026-11-13"   # 3:00 a.m. ET: new puzzle
