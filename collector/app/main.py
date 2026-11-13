@@ -33,7 +33,8 @@ BACKGROUND_SYNC_MINUTES = int(os.environ.get("BACKGROUND_SYNC_MINUTES", "60"))
 FAKE_NYT = os.environ.get("FAKE_NYT", "0") == "1"  # local testing without NYT
 ADMIN_HTML = Path(__file__).parent / "admin.html"
 
-# Buddy's visitor stats are slow to read, so they refresh in the background:
+# Visitor stats normally come from Bee Buddy's small stats file, read during the
+# sync. If that's unavailable, they're read from Buddy's page in the background:
 # after your found words change (at most once per VISITOR_STATS_MIN_GAP), and
 # at least every VISITOR_STATS_MINUTES.
 VISITOR_STATS = os.environ.get("VISITOR_STATS", "1") == "1"
@@ -61,6 +62,7 @@ class SyncState:
         self.visitors = None      # last visitor stats (private, raw)
         self.visitors_key = None  # (puzzle id, found words) they were read for
         self.visitors_at = 0.0
+        self.visitors_complete = False  # stats cover every word, so new finds need no re-read
         self.visitors_task: asyncio.Task | None = None
 
     def public(self) -> dict:
@@ -118,7 +120,7 @@ async def _refresh_visitors() -> None:
         data = None
     state.visitors_at = time.time()
     if data:
-        state.visitors, state.visitors_key = data, key
+        state.visitors, state.visitors_key, state.visitors_complete = data, key, False
         async with state.lock:   # don't write while a sync is mid-write
             _publish()
 
@@ -129,6 +131,8 @@ def _maybe_refresh_visitors() -> None:
         return
     if state.visitors_task and not state.visitors_task.done():
         return
+    if state.visitors_complete and state.visitors_key and state.visitors_key[0] == snap.game.get("id"):
+        return   # the stats file already covers every word
     key = (snap.game.get("id"), frozenset(snap.found))
     stale = time.time() - state.visitors_at > VISITOR_STATS_MAX_AGE
     if key != state.visitors_key or stale:
@@ -142,6 +146,18 @@ async def _run_sync() -> None:
         try:
             snap = await nyt.snapshot()
             state.snap = snap
+            if VISITOR_STATS and snap.logged_in:
+                try:
+                    v = await nyt.quick_visitor_stats(snap.game.get("id"))
+                except Exception as exc:
+                    log.warning("Visitor stats file failed: %s", exc)
+                    v = None
+                if v:
+                    state.visitors, state.visitors_complete = v, True
+                    state.visitors_key = (snap.game.get("id"), None)
+                    state.visitors_at = time.time()
+                elif state.visitors_complete:
+                    state.visitors_complete = False   # fall back to Buddy's page
             data = _publish()
             state.last_ok = time.time()
             if snap.logged_in:

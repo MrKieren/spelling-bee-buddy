@@ -25,6 +25,7 @@ from pathlib import Path
 
 from playwright.async_api import BrowserContext, Page, Response, async_playwright
 
+from .buddy import visitors_from_stats
 from .nyt_types import Snapshot
 from .session import SESSION_COOKIE, current_cookies
 
@@ -36,6 +37,9 @@ PUZZLE_API = "https://www.nytimes.com/svc/spelling-bee/v1/active.json"
 # scripts or ads running in the background.
 PARK_URL = "https://www.nytimes.com/robots.txt"
 STATE_API = "https://www.nytimes.com/svc/games/state/spelling_bee/latest?puzzle_id={id}"
+# Bee Buddy's own per-puzzle visitor stats: {"answers": {word: count}, "n": 10000, ...}
+STATS_API = "https://static01.nyt.com/newsgraphics/2023-01-18-spelling-bee-buddy/stats/{id}.json"
+STATS_CACHE_SECONDS = 300
 BUDDY_URL = "https://www.nytimes.com/interactive/2023/upshot/spelling-bee-buddy.html"
 
 PROFILE_DIR = Path(os.environ.get("PROFILE_DIR", "/profile"))
@@ -63,8 +67,8 @@ BROWSER_MAX_AGE = int(os.environ.get("BROWSER_RESTART_HOURS", "6")) * 3600
 # Fetches JSON from inside the parked NYT tab, so it's same-origin and carries
 # the browser's cookies exactly like the game's own requests.
 _FETCH_JS = """
-async (url) => {
-  const r = await fetch(url, { credentials: 'include', headers: { accept: 'application/json' } });
+async ([url, credentials]) => {
+  const r = await fetch(url, { credentials, headers: { accept: 'application/json' } });
   let body = null;
   try { body = await r.json(); } catch (e) {}
   return { status: r.status, body };
@@ -262,6 +266,7 @@ class NYT:
         self._started = 0.0
         self._lock = asyncio.Lock()   # guards starting / restarting the browser
         self._lean_stats = True       # turned off if Buddy won't render without blocked resources
+        self._stats_cache: dict = {}  # puzzle id -> (fetched at, visitors)
 
     async def close(self) -> None:
         async with self._lock:
@@ -334,14 +339,14 @@ class NYT:
 
     async def _fast(self, ctx: BrowserContext, logged_in: bool) -> Snapshot:
         page = await self._anchor_page(ctx)
-        r = await page.evaluate(_FETCH_JS, PUZZLE_API)
+        r = await page.evaluate(_FETCH_JS, [PUZZLE_API, "include"])
         if r["status"] != 200 or not isinstance(r["body"], dict):
             raise FastPathError(f"puzzle API returned {r['status']}")
         game = puzzle_from_active(r["body"])
 
         found, source = set(), "none"
         if logged_in:
-            r = await page.evaluate(_FETCH_JS, STATE_API.format(id=game["id"]))
+            r = await page.evaluate(_FETCH_JS, [STATE_API.format(id=game["id"]), "include"])
             if r["status"] == 200 and isinstance(r["body"], dict):
                 answers = set(game["answers"])
                 found = found_from_json([r["body"]], answers, set(game["pangrams"]), game["id"])
@@ -423,7 +428,25 @@ class NYT:
         finally:
             await page.close()
 
-    # ---------- visitor stats (slow; run in the background) ----------
+    # ---------- visitor stats ----------
+
+    async def quick_visitor_stats(self, puzzle_id) -> dict | None:
+        """Bee Buddy's stats file for the puzzle: every word's share of
+        visitors. Small and fast; cached for a few minutes."""
+        cached = self._stats_cache.get(puzzle_id)
+        if cached and time.time() - cached[0] < STATS_CACHE_SECONDS:
+            return cached[1]
+        ctx = await self._context()
+        page = await self._anchor_page(ctx)
+        r = await page.evaluate(_FETCH_JS, [STATS_API.format(id=puzzle_id), "omit"])
+        data = visitors_from_stats(r["body"]) if r["status"] == 200 and isinstance(r["body"], dict) else None
+        if data is None:
+            log.warning("Visitor stats file unavailable (HTTP %s); using Buddy's page instead", r["status"])
+            return cached[1] if cached else None
+        self._stats_cache = {puzzle_id: (time.time(), data)}
+        return data
+
+    # Slow fallback: read the stats from Buddy's rendered page.
 
     async def visitor_stats(self) -> dict | None:
         """Buddy's rendered "You vs. other visitors" table."""

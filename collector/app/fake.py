@@ -4,6 +4,7 @@ Pretends you find one more word every sync, once any cookie has been saved.
 """
 import asyncio
 
+from .buddy import visitors_from_stats
 from .nyt_types import Snapshot
 from .session import current_cookies
 
@@ -36,6 +37,11 @@ class FakeNYT:
             _found.append(remaining[0])
         found = set(_found) if logged_in else set()
         return Snapshot(game=GAME, found=found, logged_in=logged_in, found_source="fake")
+
+    async def quick_visitor_stats(self, puzzle_id) -> dict | None:
+        await asyncio.sleep(0.05)
+        counts = {w: 9700 - i * 310 for i, w in enumerate(GAME["answers"])}
+        return visitors_from_stats({"id": puzzle_id, "answers": counts, "n": 10000})
 
     async def visitor_stats(self) -> dict | None:
         await asyncio.sleep(2)

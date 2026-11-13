@@ -153,3 +153,27 @@ def test_visitors_ambiguous_new_word_waits_for_next_read():
     out = _visitors({"canal"}, rows)
     assert not any(r["found"] for r in out)
     assert "canal" not in json.dumps(out)
+
+
+def test_visitors_from_stats_file():
+    from app.buddy import visitors_from_stats
+    stats = {"id": 1, "answers": {"cant": 9765, "talon": 8244, "location": 4000}, "n": 10000, "numberOfUsers": 71456}
+    raw = visitors_from_stats(stats)
+    assert raw["sample"] == 10000 and len(raw["rows"]) == 3
+    d = build_public_data(
+        answers=GAME["answers"], pangrams=GAME["pangrams"], center=GAME["centerLetter"],
+        outer=GAME["outerLetters"], found={"cant"}, logged_in=True, visitors=raw,
+    )
+    rows = d["visitors"]["rows"]
+    assert rows[0] == {"found": True, "word": "cant", "length": 4, "pct": 97.7}
+    assert {"found": False, "letter": "T", "length": 5, "pct": 82.4} in rows
+    assert {"found": False, "letter": "L", "length": 8, "pct": 40.0} in rows
+    blob = json.dumps(d)
+    assert '"talon"' not in blob and '"location"' not in blob
+
+
+def test_visitors_from_stats_rejects_bad_files():
+    from app.buddy import visitors_from_stats
+    assert visitors_from_stats({}) is None
+    assert visitors_from_stats({"answers": {}, "n": 10000}) is None
+    assert visitors_from_stats({"answers": {"cant": 1}, "n": 0}) is None

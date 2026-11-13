@@ -51,6 +51,21 @@ def rank_for(points: int, max_points: int) -> dict:
 _UNFOUND = re.compile(r"^([a-z])\s*\((\d+)\)$", re.I)
 
 
+def visitors_from_stats(stats: dict) -> dict | None:
+    """Bee Buddy's stats file ({"answers": {word: count}, "n": sample size})
+    in the same raw shape as rows read from Buddy's page. Every word is listed;
+    public_visitors() decides which may be named."""
+    try:
+        n = int(stats["n"])
+        counts = stats["answers"]
+        if n <= 0 or not isinstance(counts, dict) or not counts:
+            return None
+        rows = [{"found": False, "text": str(w).lower(), "pct": 100.0 * int(c) / n} for w, c in counts.items()]
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {"rows": rows, "sample": n}
+
+
 def public_visitors(raw: dict | None, found: set[str], answers: set[str]) -> dict | None:
     """Turn Buddy's visitor rows into public rows.
 
@@ -62,13 +77,14 @@ def public_visitors(raw: dict | None, found: set[str], answers: set[str]) -> dic
     rows = []
     for r in raw["rows"]:
         try:
-            pct = round(float(r["pct"]), 1)
+            raw_pct = float(r["pct"])
         except (KeyError, TypeError, ValueError):
             continue
+        pct = round(raw_pct, 1)
         text = str(r.get("text", "")).strip()
         word = text.lower()
         if word in found:
-            rows.append({"found": True, "word": word, "length": len(word), "pct": pct})
+            rows.append({"found": True, "word": word, "length": len(word), "pct": pct, "_sort": raw_pct})
             continue
         m = _UNFOUND.match(text)
         if m:
@@ -77,7 +93,7 @@ def public_visitors(raw: dict | None, found: set[str], answers: set[str]) -> dic
             letter, length = word[0].upper(), len(word)
         else:
             continue
-        rows.append({"found": False, "letter": letter, "length": length, "pct": pct})
+        rows.append({"found": False, "letter": letter, "length": length, "pct": pct, "_sort": raw_pct})
 
     # Words found since Buddy was last read still sit in an unfound row
     # ("L (6)"). If a word is the only new one with its letter and length, and
@@ -96,10 +112,12 @@ def public_visitors(raw: dict | None, found: set[str], answers: set[str]) -> dic
         candidates = rows_by_key.get(key, [])
         if len(words) == 1 and len(candidates) == 1:
             r = candidates[0]
-            pct = r["pct"]
+            pct, raw_pct = r["pct"], r["_sort"]
             r.clear()
-            r.update(found=True, word=words[0], length=key[1], pct=pct)
-    rows.sort(key=lambda r: -r["pct"])
+            r.update(found=True, word=words[0], length=key[1], pct=pct, _sort=raw_pct)
+    rows.sort(key=lambda r: -r["_sort"])   # unrounded, so near-ties keep Buddy's order
+    for r in rows:
+        del r["_sort"]
     sample = raw.get("sample")
     return {"sample": sample if isinstance(sample, int) else None, "rows": rows}
 

@@ -24,11 +24,11 @@ It runs on your own machine (a Raspberry Pi works well) using **your own NYT sub
 1. When the page opens, it shows the last saved copy straight away and asks the collector to sync. While the page is open it syncs again every 60 seconds, and whenever you switch back to the tab.
 2. The collector keeps one headless Chromium running with your NYT session cookie, with a tab parked on nytimes.com. A sync fetches the same two small JSON files the game itself uses, today's puzzle and your game state, so it usually takes well under a second. If that fails, it falls back to loading the full Spelling Bee page.
 3. It works out the grid, two-letter list, points, rank and pangrams, then writes `buddy.json` for the public page.
-4. When your found words change, it reads Bee Buddy's **You vs. other Bee Buddy visitors** stats in the background, loading Bee Buddy's page without ads, images or fonts. That's slower than the rest, so the section can lag a few seconds behind. To bridge the gap, a newly found word moves into the stats straight away when it's the only unfound word with its first letter and length, because then its percentage is already known.
+4. For the **You vs. other Bee Buddy visitors** section, it fetches Bee Buddy's small per-puzzle stats file (how many of a 10,000-visitor sample found each word), cached for 5 minutes. Because the file covers every word, the section updates as soon as you find a word. If the file isn't available, it falls back to reading the stats from Bee Buddy's page in the background (without ads or images), which lags a few seconds behind.
 
 **The answer list never leaves the collector.** The public file contains counts only. Like Bee Buddy, the visitor stats name only the words you've found; the rest appear as first letter and length.
 
-However many people open the page, NYT is fetched at most once per `MIN_SYNC_INTERVAL` (5 s by default), and only one sync runs at a time. Bee Buddy's page is loaded at most once every 30 seconds.
+However many people open the page, NYT is fetched at most once per `MIN_SYNC_INTERVAL` (5 s by default), and only one sync runs at a time. Bee Buddy's stats file is fetched at most every 5 minutes.
 
 ## Requirements
 
@@ -114,7 +114,7 @@ All settings are optional; put them in `.env`.
 | `MIN_SYNC_INTERVAL` | `5` | Minimum seconds between NYT fetches |
 | `BACKGROUND_SYNC_MINUTES` | `60` | Sync even when nobody has the page open (`0` = only on visits) |
 | `VISITOR_STATS` | `1` | Include the "You vs. other visitors" section |
-| `VISITOR_STATS_MINUTES` | `15` | Re-read visitor stats at least this often, even without new words |
+| `VISITOR_STATS_MINUTES` | `15` | If the stats file is unavailable: re-read Bee Buddy's page at least this often |
 | `DEBUG_CAPTURE` | `0` | Save requests, the Buddy page and screenshots to `./debug` on each sync |
 | `FAKE_NYT` | `0` | Use a built-in demo puzzle instead of NYT |
 | `BROWSER_RESTART_HOURS` | `6` | Restart the collector's browser this often, to keep its memory in check |
