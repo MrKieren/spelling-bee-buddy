@@ -41,6 +41,22 @@ BUDDY_URL = "https://www.nytimes.com/interactive/2023/upshot/spelling-bee-buddy.
 PROFILE_DIR = Path(os.environ.get("PROFILE_DIR", "/profile"))
 DEBUG_DIR = Path(os.environ.get("DEBUG_DIR", "/debug"))
 DEBUG_CAPTURE = os.environ.get("DEBUG_CAPTURE", "0") == "1"
+# When loading Buddy for its visitor stats, only NYT's own page, scripts, styles
+# and data are needed: skip ads, trackers, images and fonts to load it faster.
+_STATS_HOSTS = ("nytimes.com", "nyt.com")
+_STATS_SKIP_TYPES = {"image", "media", "font"}
+
+
+async def _lean_route(route) -> None:
+    req = route.request
+    host = req.url.split("/")[2].split(":")[0] if "://" in req.url else ""
+    ours = any(host == h or host.endswith("." + h) for h in _STATS_HOSTS)
+    if not ours or req.resource_type in _STATS_SKIP_TYPES:
+        await route.abort()
+    else:
+        await route.fallback()
+
+
 # Restart the browser this often, so a long-running Chromium can't build up memory.
 BROWSER_MAX_AGE = int(os.environ.get("BROWSER_RESTART_HOURS", "6")) * 3600
 
@@ -245,6 +261,7 @@ class NYT:
         self._anchor: Page | None = None
         self._started = 0.0
         self._lock = asyncio.Lock()   # guards starting / restarting the browser
+        self._lean_stats = True       # turned off if Buddy won't render without blocked resources
 
     async def close(self) -> None:
         async with self._lock:
@@ -411,10 +428,25 @@ class NYT:
         """Buddy's rendered "You vs. other visitors" table."""
         ctx = await self._context()
         await _load_session(ctx)
+        if self._lean_stats:
+            data = await self._read_visitors(ctx, lean=True, timeout=20_000)
+            if data is not None:
+                return data
+        data = await self._read_visitors(ctx, lean=False, timeout=45_000)
+        if data is not None and self._lean_stats:
+            # Full load worked where the lean one didn't: Buddy needs something we block.
+            log.warning("Buddy only renders with ads and images allowed; loading it in full from now on")
+            self._lean_stats = False
+        return data
+
+    async def _read_visitors(self, ctx: BrowserContext, lean: bool, timeout: int) -> dict | None:
         page = await ctx.new_page()
+        started = time.monotonic()
         try:
+            if lean:
+                await page.route("**/*", _lean_route)
             await page.goto(BUDDY_URL, wait_until="domcontentloaded", timeout=60_000)
-            await page.wait_for_selector(".reader-stats table tbody tr .bar-fg", timeout=45_000)
+            await page.wait_for_selector(".reader-stats table tbody tr .bar-fg", state="attached", timeout=timeout)
             data = await page.evaluate(_VISITORS_JS)
         except Exception as exc:
             log.warning("Couldn't read Buddy's visitor stats: %s", exc)
@@ -422,6 +454,6 @@ class NYT:
         finally:
             await page.close()
         if data and data.get("rows"):
-            log.info("Read visitor stats for %d words", len(data["rows"]))
+            log.info("Read visitor stats for %d words in %.1fs", len(data["rows"]), time.monotonic() - started)
             return data
         return None

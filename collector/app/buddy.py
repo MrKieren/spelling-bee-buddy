@@ -78,6 +78,27 @@ def public_visitors(raw: dict | None, found: set[str], answers: set[str]) -> dic
         else:
             continue
         rows.append({"found": False, "letter": letter, "length": length, "pct": pct})
+
+    # Words found since Buddy was last read still sit in an unfound row
+    # ("L (6)"). If a word is the only new one with its letter and length, and
+    # there's exactly one unfound row with that letter and length, that row is
+    # its percentage, so show it as found straight away. Ambiguous cases wait
+    # for the next Buddy read.
+    named = {r["word"] for r in rows if r["found"]}
+    new_by_key: dict[tuple, list[str]] = {}
+    for w in found - named:
+        new_by_key.setdefault((w[0].upper(), len(w)), []).append(w)
+    rows_by_key: dict[tuple, list[dict]] = {}
+    for r in rows:
+        if not r["found"]:
+            rows_by_key.setdefault((r["letter"], r["length"]), []).append(r)
+    for key, words in new_by_key.items():
+        candidates = rows_by_key.get(key, [])
+        if len(words) == 1 and len(candidates) == 1:
+            r = candidates[0]
+            pct = r["pct"]
+            r.clear()
+            r.update(found=True, word=words[0], length=key[1], pct=pct)
     rows.sort(key=lambda r: -r["pct"])
     sample = raw.get("sample")
     return {"sample": sample if isinstance(sample, int) else None, "rows": rows}

@@ -38,7 +38,7 @@ ADMIN_HTML = Path(__file__).parent / "admin.html"
 # at least every VISITOR_STATS_MINUTES.
 VISITOR_STATS = os.environ.get("VISITOR_STATS", "1") == "1"
 VISITOR_STATS_MAX_AGE = int(os.environ.get("VISITOR_STATS_MINUTES", "15")) * 60
-VISITOR_STATS_MIN_GAP = 60
+VISITOR_STATS_MIN_GAP = 30
 
 if FAKE_NYT:
     from .fake import FakeNYT as Client

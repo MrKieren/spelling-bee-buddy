@@ -24,11 +24,11 @@ It runs on your own machine (a Raspberry Pi works well) using **your own NYT sub
 1. When the page opens, it shows the last saved copy straight away and asks the collector to sync. While the page is open it syncs again every 60 seconds, and whenever you switch back to the tab.
 2. The collector keeps one headless Chromium running with your NYT session cookie, with a tab parked on nytimes.com. A sync fetches the same two small JSON files the game itself uses, today's puzzle and your game state, so it usually takes well under a second. If that fails, it falls back to loading the full Spelling Bee page.
 3. It works out the grid, two-letter list, points, rank and pangrams, then writes `buddy.json` for the public page.
-4. When your found words change, it reads Bee Buddy's **You vs. other Bee Buddy visitors** stats in the background. That needs Bee Buddy's full page, so it's slower, and it updates the page a little after the rest.
+4. When your found words change, it reads Bee Buddy's **You vs. other Bee Buddy visitors** stats in the background, loading Bee Buddy's page without ads, images or fonts. That's slower than the rest, so the section can lag a few seconds behind. To bridge the gap, a newly found word moves into the stats straight away when it's the only unfound word with its first letter and length, because then its percentage is already known.
 
 **The answer list never leaves the collector.** The public file contains counts only. Like Bee Buddy, the visitor stats name only the words you've found; the rest appear as first letter and length.
 
-However many people open the page, NYT is fetched at most once per `MIN_SYNC_INTERVAL` (5 s by default), and only one sync runs at a time. Bee Buddy's page is loaded at most once a minute.
+However many people open the page, NYT is fetched at most once per `MIN_SYNC_INTERVAL` (5 s by default), and only one sync runs at a time. Bee Buddy's page is loaded at most once every 30 seconds.
 
 ## Requirements
 
