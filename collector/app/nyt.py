@@ -357,17 +357,18 @@ class NYT:
         debug_log: list[dict] = []  # every fetch/XHR in debug mode, whatever its type
 
         async def on_response(resp: Response):
-            if "nytimes.com" not in resp.url:
-                return
             ctype = resp.headers.get("content-type", "")
-            if DEBUG_CAPTURE and resp.request.resource_type in ("fetch", "xhr"):
+            # Debug: record data requests to every domain (Buddy's own data may
+            # come from nyt.com or a CDN, not just nytimes.com).
+            if DEBUG_CAPTURE and (resp.request.resource_type in ("fetch", "xhr", "other")
+                                  or any(t in ctype for t in ("json", "csv", "text/plain"))):
                 entry = {"url": resp.url, "status": resp.status, "type": ctype}
                 try:
                     entry["text"] = (await resp.text())[:2_000_000]
                 except Exception as exc:
                     entry["error"] = str(exc)
                 debug_log.append(entry)
-            if "json" not in ctype:
+            if "nytimes.com" not in resp.url or "json" not in ctype:
                 return
             try:
                 captured.append({"url": resp.url, "body": await resp.json()})
